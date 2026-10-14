@@ -1,0 +1,215 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f766e">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:; connect-src 'self'">
+<link rel="manifest" href="manifest.json">
+<link rel="icon" href="icon-192.png">
+<title>Mon Solde</title>
+<style>
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;font-family:system-ui,sans-serif;background:#f1f5f9;color:#0f172a;padding:env(safe-area-inset-top) 0 env(safe-area-inset-bottom)}
+.wrap{max-width:480px;margin:0 auto;padding:16px}
+h1{font-size:20px;margin:0 0 12px}
+.card{background:#fff;border-radius:14px;padding:16px;margin-bottom:14px;box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.bal{font-size:34px;font-weight:700;margin:4px 0}
+.neg{color:#b91c1c}.pos{color:#0f766e}
+.sub{font-size:13px;color:#64748b}
+input,button{font:inherit;width:100%;padding:12px;border-radius:10px;border:1px solid #cbd5e1;margin-top:8px}
+input{background:#fff}
+button{background:#0f766e;color:#fff;border:0;font-weight:600}
+button.sec{background:#e2e8f0;color:#0f172a}
+button.danger{background:#b91c1c}
+.seg{display:flex;gap:8px;margin-top:8px}
+.seg button{margin:0;background:#e2e8f0;color:#0f172a}
+.seg button.on.deb{background:#b91c1c;color:#fff}
+.seg button.on.cre{background:#0f766e;color:#fff}
+.op{display:flex;justify-content:space-between;align-items:center;padding:10px 0;border-bottom:1px solid #e2e8f0}
+.op:last-child{border:0}
+.op .l{font-weight:600;overflow-wrap:anywhere}
+.op .r{display:flex;align-items:center;gap:10px;white-space:nowrap}
+.x{width:auto;margin:0;padding:6px 10px;background:#fee2e2;color:#b91c1c}
+.row{display:flex;gap:8px}.row>*{flex:1}
+.msg{color:#b91c1c;font-size:14px;min-height:20px;margin-top:8px}
+.hide{display:none}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<div id="setup" class="card hide">
+  <h1>Première utilisation</h1>
+  <div class="sub">Choisis un code PIN (6 chiffres minimum). Il chiffre tes données : s'il est perdu, elles sont irrécupérables.</div>
+  <input id="s-pin" type="password" inputmode="numeric" autocomplete="new-password" placeholder="Code PIN (6 à 12 chiffres)">
+  <input id="s-pin2" type="password" inputmode="numeric" autocomplete="new-password" placeholder="Confirmer le PIN">
+  <input id="s-init" inputmode="decimal" placeholder="Solde initial (ex : 1250,40)">
+  <button id="s-ok">Créer</button>
+  <div id="s-msg" class="msg"></div>
+</div>
+
+<div id="lock" class="card hide">
+  <h1>Mon Solde</h1>
+  <input id="l-pin" type="password" inputmode="numeric" autocomplete="current-password" placeholder="Code PIN">
+  <button id="l-ok">Déverrouiller</button>
+  <div id="l-msg" class="msg"></div>
+</div>
+
+<div id="main" class="hide">
+  <div class="card">
+    <div class="sub">Solde actuel</div>
+    <div id="bal" class="bal">0,00 €</div>
+    <div class="sub" id="bal-sub"></div>
+  </div>
+
+  <div class="card">
+    <h1>Nouvelle opération</h1>
+    <div class="seg">
+      <button id="t-deb" class="deb on">Débit (−)</button>
+      <button id="t-cre" class="cre">Crédit (+)</button>
+    </div>
+    <input id="o-amt" inputmode="decimal" placeholder="Montant (ex : 45,90)">
+    <input id="o-lbl" placeholder="Libellé (ex : Courses)" maxlength="80">
+    <input id="o-date" type="date">
+    <button id="o-save">Enregistrer l'opération</button>
+    <div id="o-msg" class="msg"></div>
+  </div>
+
+  <div class="card">
+    <h1>Opérations</h1>
+    <div id="list"></div>
+  </div>
+
+  <div class="card">
+    <button id="b-init" class="sec">Modifier le solde initial</button>
+    <button id="b-exp" class="sec">Exporter une sauvegarde (chiffrée)</button>
+    <button id="b-lock" class="sec">Verrouiller</button>
+  </div>
+</div>
+
+</div>
+
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const enc=new TextEncoder(),dec=new TextDecoder();
+const toB64=u=>{u=new Uint8Array(u);let s="";for(let i=0;i<u.length;i++)s+=String.fromCharCode(u[i]);return btoa(s)};
+const fromB64=s=>Uint8Array.from(atob(s),c=>c.charCodeAt(0));
+const K_SALT="cb_salt",K_DATA="cb_data";
+let key=null,db=null,type="deb",fails=0,lockedUntil=0;
+
+const eur=c=>(c/100).toLocaleString("fr-FR",{style:"currency",currency:"EUR"});
+const parseAmt=s=>{s=String(s).trim().replace(/\s/g,"").replace(",",".");if(!/^-?\d+(\.\d{1,2})?$/.test(s))return null;return Math.round(parseFloat(s)*100)};
+const today=()=>{const d=new Date();return d.getFullYear()+"-"+String(d.getMonth()+1).padStart(2,"0")+"-"+String(d.getDate()).padStart(2,"0")};
+
+async function derive(pin,salt){
+  const base=await crypto.subtle.importKey("raw",enc.encode(pin),"PBKDF2",false,["deriveKey"]);
+  return crypto.subtle.deriveKey({name:"PBKDF2",salt,iterations:310000,hash:"SHA-256"},base,{name:"AES-GCM",length:256},false,["encrypt","decrypt"]);
+}
+async function persist(){
+  const iv=crypto.getRandomValues(new Uint8Array(12));
+  const ct=await crypto.subtle.encrypt({name:"AES-GCM",iv},key,enc.encode(JSON.stringify(db)));
+  localStorage.setItem(K_DATA,toB64(iv)+"."+toB64(ct));
+}
+async function readDb(k){
+  const [iv,ct]=localStorage.getItem(K_DATA).split(".");
+  const pt=await crypto.subtle.decrypt({name:"AES-GCM",iv:fromB64(iv)},k,fromB64(ct));
+  return JSON.parse(dec.decode(pt));
+}
+
+function show(id){["setup","lock","main"].forEach(x=>$("#"+x).classList.toggle("hide",x!==id))}
+function balance(){return db.ops.reduce((s,o)=>s+(o.type==="cre"?o.amt:-o.amt),db.initial)}
+
+function render(){
+  const b=balance();
+  $("#bal").textContent=eur(b);
+  $("#bal").className="bal "+(b<0?"neg":"pos");
+  $("#bal-sub").textContent="Solde initial : "+eur(db.initial)+" · "+db.ops.length+" opération(s)";
+  const l=$("#list");l.innerHTML="";
+  if(!db.ops.length){l.innerHTML='<div class="sub">Aucune opération.</div>';return}
+  [...db.ops].sort((a,b)=>b.date.localeCompare(a.date)||b.id-a.id).forEach(o=>{
+    const row=document.createElement("div");row.className="op";
+    const left=document.createElement("div");
+    const lb=document.createElement("div");lb.className="l";lb.textContent=o.label||"(sans libellé)";
+    const dt=document.createElement("div");dt.className="sub";dt.textContent=o.date.split("-").reverse().join("/");
+    left.append(lb,dt);
+    const right=document.createElement("div");right.className="r";
+    const am=document.createElement("div");am.className=o.type==="cre"?"pos":"neg";am.style.fontWeight="700";
+    am.textContent=(o.type==="cre"?"+":"−")+eur(o.amt);
+    const x=document.createElement("button");x.className="x";x.textContent="✕";x.setAttribute("aria-label","Supprimer");
+    x.onclick=async()=>{if(!confirm("Supprimer cette opération ?"))return;db.ops=db.ops.filter(p=>p.id!==o.id);await persist();render()};
+    right.append(am,x);row.append(left,right);l.append(row);
+  });
+}
+
+function setType(t){type=t;$("#t-deb").classList.toggle("on",t==="deb");$("#t-cre").classList.toggle("on",t==="cre")}
+function lockApp(){key=null;db=null;$("#l-pin").value="";$("#l-msg").textContent="";show("lock")}
+
+$("#t-deb").onclick=()=>setType("deb");
+$("#t-cre").onclick=()=>setType("cre");
+
+$("#s-ok").onclick=async()=>{
+  const p=$("#s-pin").value,p2=$("#s-pin2").value,init=parseAmt($("#s-init").value||"0");
+  const m=$("#s-msg");
+  if(!/^\d{6,12}$/.test(p)){m.textContent="Le PIN doit contenir 6 à 12 chiffres.";return}
+  if(p!==p2){m.textContent="Les deux PIN sont différents.";return}
+  if(init===null){m.textContent="Solde initial invalide.";return}
+  const salt=crypto.getRandomValues(new Uint8Array(16));
+  localStorage.setItem(K_SALT,toB64(salt));
+  key=await derive(p,salt);
+  db={initial:init,ops:[],nextId:1};
+  await persist();
+  $("#s-pin").value=$("#s-pin2").value="";
+  $("#o-date").value=today();render();show("main");
+};
+
+$("#l-ok").onclick=async()=>{
+  const m=$("#l-msg");
+  if(Date.now()<lockedUntil){m.textContent="Patiente "+Math.ceil((lockedUntil-Date.now())/1000)+" s.";return}
+  try{
+    const k=await derive($("#l-pin").value,fromB64(localStorage.getItem(K_SALT)));
+    db=await readDb(k);key=k;fails=0;
+    if(!db.nextId)db.nextId=Date.now();
+    $("#l-pin").value="";$("#o-date").value=today();render();show("main");
+  }catch(e){
+    fails++;lockedUntil=Date.now()+Math.min(60,fails*fails)*1000;
+    m.textContent="PIN incorrect.";
+  }
+};
+$("#l-pin").addEventListener("keydown",e=>{if(e.key==="Enter")$("#l-ok").click()});
+
+$("#o-save").onclick=async()=>{
+  const m=$("#o-msg");
+  const amt=parseAmt($("#o-amt").value);
+  if(amt===null||amt<=0){m.textContent="Montant invalide.";return}
+  const date=$("#o-date").value||today();
+  db.ops.push({id:db.nextId++,date,label:$("#o-lbl").value.trim(),type,amt});
+  await persist();
+  $("#o-amt").value="";$("#o-lbl").value="";m.style.color="#0f766e";m.textContent="Opération enregistrée.";
+  setTimeout(()=>{m.textContent="";m.style.color=""},2000);
+  render();
+};
+
+$("#b-init").onclick=async()=>{
+  const v=prompt("Nouveau solde initial (en €) :",(db.initial/100).toString().replace(".",","));
+  if(v===null)return;const c=parseAmt(v);
+  if(c===null){alert("Montant invalide.");return}
+  db.initial=c;await persist();render();
+};
+$("#b-exp").onclick=()=>{
+  const blob=new Blob([localStorage.getItem(K_SALT)+"\n"+localStorage.getItem(K_DATA)],{type:"text/plain"});
+  const a=document.createElement("a");a.href=URL.createObjectURL(blob);
+  a.download="mon-solde-sauvegarde-"+today()+".txt";a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href),5000);
+};
+$("#b-lock").onclick=lockApp;
+
+document.addEventListener("visibilitychange",()=>{if(document.hidden&&key)lockApp()});
+
+if("serviceWorker" in navigator)navigator.serviceWorker.register("sw.js").catch(()=>{});
+show(localStorage.getItem(K_DATA)?"lock":"setup");
+</script>
+</body>
+</html>
